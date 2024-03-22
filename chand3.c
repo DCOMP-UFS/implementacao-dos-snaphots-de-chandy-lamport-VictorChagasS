@@ -1,19 +1,34 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h> 
+#include <pthread.h>
 #include <unistd.h>
 #include <semaphore.h>
 #include <time.h>
-#include <mpi.h>     
+#include <mpi.h>
 
 #define THREAD_NUM 3
 #define CLOCK_QUEUE_SIZE 10
+#define SNAPSHOT_MARKER -1
+#define BUFFER_SIZE 10 // Tamanho do buffer para armazenar relógios
 
 typedef struct {
     int p[3];
     int idProcess;
 } Clock;
+
+typedef struct {
+    int id;
+    Clock clock;
+    int snapshotTaken;
+} Process;
+
+typedef struct {
+    Clock clock;
+    Clock in[BUFFER_SIZE];
+    Clock out[BUFFER_SIZE];
+    int flag; // Flag para identificar se é um marcador
+} Snapshot;
 
 pthread_mutex_t saidaMutex;
 pthread_cond_t saidaCondEmpty;
@@ -36,7 +51,7 @@ void Event(int pid, Clock *clock) {
 Clock GetClock(pthread_mutex_t *mutex, pthread_cond_t *condEmpty, pthread_cond_t *condFull, int *clockCount, Clock *clockQueue) {
     Clock clock;
     pthread_mutex_lock(mutex);
-    
+
     while (*clockCount == 0) {
         pthread_cond_wait(condEmpty, mutex);
     }
@@ -48,11 +63,11 @@ Clock GetClock(pthread_mutex_t *mutex, pthread_cond_t *condEmpty, pthread_cond_t
     }
 
     (*clockCount)--;
-    
+
     pthread_mutex_unlock(mutex);
 
     pthread_cond_signal(condFull);
-    
+
     return clock;
 }
 
@@ -62,12 +77,11 @@ void PutClock(pthread_mutex_t *mutex, pthread_cond_t *condEmpty, pthread_cond_t 
     while (*clockCount == CLOCK_QUEUE_SIZE) {
         pthread_cond_wait(condFull, mutex);
     }
-    
+
     Clock temp = clock;
 
     clockQueue[*clockCount] = temp;
     (*clockCount)++;
-    
 
     pthread_mutex_unlock(mutex);
     pthread_cond_signal(condEmpty);
@@ -81,6 +95,12 @@ void SendControl(int id, Clock *clock) {
 Clock* ReceiveControl(int id, Clock *clock) {
     Clock* temp = clock;
     Clock clock2 = GetClock(&entradaMutex, &entradaCondEmpty, &entradaCondFull, &entradaClockCount, entradaClockQueue);
+
+    if (clock2.idProcess == SNAPSHOT_MARKER) {
+        temp = &clock2;
+        return temp;
+    } //Se receber um marcador, retorna o marcador para sinalizar à thread Main que um marcador foi recebido
+
     for (int i = 0; i < 3; i++) {
         if (temp->p[i] < clock2.p[i]) {
             temp->p[i] = clock2.p[i];
@@ -107,60 +127,117 @@ void Receive(int pid, Clock *clock){
     clock->p[0] = mensagem[0];
     clock->p[1] = mensagem[1];
     clock->p[2] = mensagem[2];
+
 }
+
+void InitiateSnapshot(Process* process) {
+
+    Snapshot snapshot;
+    snapshot.clock = process->clock;
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        snapshot.in[i] = entradaClockQueue[i];
+        snapshot.out[i] = saidaClockQueue[i];
+    }
+    process->snapshotTaken = 1; //Sinaliza na estrutura que o processo já fez snapshot
+
+    Clock *clock = malloc(sizeof(Clock));
+    clock->idProcess = SNAPSHOT_MARKER;
+
+    //Imprime o Snapshot (Relógio, canal de entrada e canal de saída)
+    printf("Snapshot criado no processo %d. Clock: (%d, %d, %d)\n",
+           process->id, process->clock.p[0], process->clock.p[1], process->clock.p[2]);
+    printf("CANAL ENTRADA ");
+    for (int i = 0; i < entradaClockCount; i++){
+        printf("[(%d, %d, %d)]  ", snapshot.in[i].p[0], snapshot.in[i].p[1], snapshot.in[i].p[2]);
+    }
+    printf("\nCANAL SAIDA: ");
+    for (int i = 0; i < saidaClockCount; i++){
+        printf("[(%d, %d, %d)]  ", snapshot.out[i].p[0], snapshot.out[i].p[1], snapshot.out[i].p[2]);
+    }
+    printf("\n");
+
+    //Envia marcadores (-1) para os outros processos
+    for (int i = 0; i < 3; i++){
+        if (i != process->id){
+            clock->p[0] = -1;
+            clock->p[1] = -1;
+            clock->p[2] = -1;
+            clock->idProcess = i;
+            PutClock(&saidaMutex, &saidaCondEmpty, &saidaCondFull, &saidaClockCount, *clock, saidaClockQueue);
+        }
+    }
+
+    free(clock);
+}
+
 
 void *MainThread(void *args) {
     long id = (long) args;
     int pid = (int) id;
     Clock* clock = malloc(sizeof(Clock));
-    
+
     // Inicializando os campos da estrutura Clock
     clock->p[0] = 0;
     clock->p[1] = 0;
     clock->p[2] = 0;
-    clock->idProcess = 0;
-        
+    clock->idProcess =  pid;
+    Process process;
+    process.id = pid;
+    process.clock = *clock;
+    process.snapshotTaken = 0;
+
     if (pid == 0) {
-        
+
         Event(pid, clock);
-        
-      
+
         clock->idProcess = 1;
         SendControl(pid, clock);
-       
-        clock = ReceiveControl(pid, clock);
-        
-      
-        clock->idProcess = 2;
-        SendControl(pid, clock);
-       
-        clock = ReceiveControl(pid, clock);
-        
-        
-        clock->idProcess = 1;
-        SendControl(pid, clock);
-    
-       
-        Event(pid, clock);
-    } else if (pid == 1) {
-        
-        clock->idProcess = 0;
-        SendControl(pid, clock);
-        
-     
-        clock = ReceiveControl(pid, clock);
-        
 
         clock = ReceiveControl(pid, clock);
-    } else if (pid == 2) {
-    
-        Event(pid, clock);
+
+
+        clock->idProcess = 2;
+        SendControl(pid, clock);
         
-    
+     
+
+        clock = ReceiveControl(pid, clock);
+        
+            if (!process.snapshotTaken) {
+            InitiateSnapshot(&process);
+        }
+
+
+
+        clock->idProcess = 1;
+        SendControl(pid, clock);
+
+
+        Event(pid, clock);
+
+    } else if (pid == 1) {
+
         clock->idProcess = 0;
         SendControl(pid, clock);
-     
+
         clock = ReceiveControl(pid, clock);
+       
+
+        clock = ReceiveControl(pid, clock);
+
+      
+      
+    } else if (pid == 2) {
+
+        Event(pid, clock);
+
+        clock->idProcess = 0;
+        SendControl(pid, clock);
+
+        clock = ReceiveControl(pid, clock);
+
+     
+      
     }
 
     return NULL;
@@ -169,7 +246,7 @@ void *MainThread(void *args) {
 void *SendThread(void *args) {
     long pid = (long) args;
     Clock clock;
-    
+
     while(1){
       clock = GetClock(&saidaMutex, &saidaCondEmpty, &saidaCondFull, &saidaClockCount, saidaClockQueue);
       Send(pid, &clock);
@@ -186,7 +263,7 @@ void *ReceiveThread(void *args) {
       Receive(pid, &clock);
       PutClock(&entradaMutex, &entradaCondEmpty, &entradaCondFull, &entradaClockCount, clock, entradaClockQueue);
     }
- 
+
     return NULL;
 }
 
@@ -197,7 +274,7 @@ void process0(){
    pthread_create(&thread[1], NULL, &SendThread, (void*) 0);
    pthread_create(&thread[2], NULL, &ReceiveThread, (void*) 0);
 
-   for (int i = 0; i < THREAD_NUM; i++){  
+   for (int i = 0; i < THREAD_NUM; i++){
       if (pthread_join(thread[i], NULL) != 0) {
          perror("Falha ao juntar a thread");
       }
@@ -210,8 +287,8 @@ void process1(){
    pthread_create(&thread[0], NULL, &MainThread, (void*) 1);
    pthread_create(&thread[1], NULL, &SendThread, (void*) 1);
    pthread_create(&thread[2], NULL, &ReceiveThread, (void*) 1);
-   
-   for (int i = 0; i < THREAD_NUM; i++){  
+
+   for (int i = 0; i < THREAD_NUM; i++){
       if (pthread_join(thread[i], NULL) != 0) {
          perror("Falha ao juntar a thread");
       }
@@ -224,8 +301,8 @@ void process2(){
    pthread_create(&thread[0], NULL, &MainThread, (void*) 2);
    pthread_create(&thread[1], NULL, &SendThread, (void*) 2);
    pthread_create(&thread[2], NULL, &ReceiveThread, (void*) 2);
-   
-   for (int i = 0; i < THREAD_NUM; i++){  
+
+   for (int i = 0; i < THREAD_NUM; i++){
       if (pthread_join(thread[i], NULL) != 0) {
          perror("Falha ao juntar a thread");
       }
@@ -234,34 +311,37 @@ void process2(){
 
 int main(int argc, char* argv[]) {
    int my_rank;
-   
+
    pthread_mutex_init(&entradaMutex, NULL);
    pthread_mutex_init(&saidaMutex, NULL);
    pthread_cond_init(&entradaCondEmpty, NULL);
    pthread_cond_init(&saidaCondEmpty, NULL);
    pthread_cond_init(&entradaCondFull, NULL);
    pthread_cond_init(&saidaCondFull, NULL);
-  
-   
-   MPI_Init(NULL, NULL); 
-   MPI_Comm_rank(MPI_COMM_WORLD, &my_rank); 
 
-   if (my_rank == 0) { 
+
+   MPI_Init(NULL, NULL);
+   MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+
+   if (my_rank == 0) {
       process0();
-   } else if (my_rank == 1) {  
+   } else if (my_rank == 1) {
       process1();
-   } else if (my_rank == 2) {  
+   } else if (my_rank == 2) {
       process2();
    }
-   
+
+   /* Finaliza MPI */
+
+
    pthread_mutex_destroy(&entradaMutex);
    pthread_mutex_destroy(&saidaMutex);
    pthread_cond_destroy(&entradaCondEmpty);
    pthread_cond_destroy(&saidaCondEmpty);
    pthread_cond_destroy(&entradaCondFull);
    pthread_cond_destroy(&saidaCondFull);
-   
+
    MPI_Finalize();
 
    return 0;
-} 
+}
