@@ -20,7 +20,7 @@ typedef struct {
 typedef struct {
     int id;
     Clock clock;
-    int snapshotTaken;
+    int snapshotPega;
 } Process;
 
 typedef struct {
@@ -138,7 +138,7 @@ void InitiateSnapshot(Process* process) {
         snapshot.in[i] = entradaClockQueue[i];
         snapshot.out[i] = saidaClockQueue[i];
     }
-    process->snapshotTaken = 1; //Sinaliza na estrutura que o processo já fez snapshot
+    process->snapshotPega = 1; //Sinaliza na estrutura que o processo já fez snapshot
 
     Clock *clock = malloc(sizeof(Clock));
     clock->idProcess = SNAPSHOT_MARKER;
@@ -184,7 +184,7 @@ void *MainThread(void *args) {
     Process process;
     process.id = pid;
     process.clock = *clock;
-    process.snapshotTaken = 0;
+    process.snapshotPega = 0;
 
     if (pid == 0) {
 
@@ -198,14 +198,14 @@ void *MainThread(void *args) {
 
         clock->idProcess = 2;
         SendControl(pid, clock);
-        
+             if (!process.snapshotPega) {
+            InitiateSnapshot(&process);
+        }
      
 
         clock = ReceiveControl(pid, clock);
         
-            if (!process.snapshotTaken) {
-            InitiateSnapshot(&process);
-        }
+       
 
 
 
@@ -221,6 +221,8 @@ void *MainThread(void *args) {
         SendControl(pid, clock);
 
         clock = ReceiveControl(pid, clock);
+        
+        
        
 
         clock = ReceiveControl(pid, clock);
